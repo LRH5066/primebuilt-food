@@ -1,0 +1,29 @@
+name: Build food search
+
+on:
+  schedule:
+    - cron: '17 3 * * 1'   # every Monday 03:17 UTC
+  workflow_dispatch:        # "Run workflow" button
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download Open Food Facts data
+        run: curl -L --fail --retry 3 -o off.csv.gz https://static.openfoodfacts.org/data/en.openfoodfacts.org.products.csv.gz
+      - name: Build the search files
+        run: python3 build.py off.csv.gz site
+      - name: Publish to the "site" branch (Cloudflare Pages picks it up)
+        run: |
+          cd site
+          git init -q -b site
+          git config user.name "PrimeBuilt food search"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Food search $(date -u +%F)"
+          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" site
