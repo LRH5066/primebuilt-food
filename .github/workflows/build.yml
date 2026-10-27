@@ -2,7 +2,7 @@ name: Build food search
 
 on:
   schedule:
-    - cron: '17 3 * * 1'   # every Monday 03:17 UTC
+    - cron: '17 7 * * *'   # every day 07:17 UTC (after Open Food Facts' nightly export)
   workflow_dispatch:        # "Run workflow" button
 
 permissions:
