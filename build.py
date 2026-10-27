@@ -1,7 +1,7 @@
 """
 PrimeBuilt food search: builds small static search files from Open Food Facts.
 
-Runs weekly on GitHub Actions (see .github/workflows/build.yml):
+Runs daily on GitHub Actions (see .github/workflows/build.yml):
   python3 build.py en.openfoodfacts.org.products.csv.gz site
 
 Output (served as plain files by Cloudflare Pages):
@@ -10,7 +10,7 @@ Output (served as plain files by Cloudflare Pages):
   site/_headers            cache rules
   site/ATTRIBUTION.txt     licence + credit
 
-The app downloads index.json (once a week) and then only the one small file
+The app downloads index.json (twice a day) and then only the one small file
 for what you type, and searches it on the phone.
 
 Data: Open Food Facts (https://world.openfoodfacts.org), Open Database License (ODbL).
@@ -20,10 +20,13 @@ import csv, gzip, json, os, re, sys, unicodedata, datetime, collections
 
 SRC, OUT = sys.argv[1], sys.argv[2]
 MAX_PER_FILE = 3000        # most-scanned products kept per prefix file
+MAX_FILES = 19500          # Cloudflare Pages allows 20,000 files
+# Words too common to be useful in a two-word file
+STOP = {'and', 'with', 'the', 'in', 'of', 'for', 'a', 'to', 'on', 'or', 'no', 'de', 'en', 'et', 'la', 'le', 'per', 'from', 'free', 'pack', 'x'}
 SPLIT_AT = 1200            # a 2-letter group bigger than this is split into 3-letter files
 csv.field_size_limit(1 << 30)
 
-COLS = ['code', 'name', 'brand', 'kcal', 'protein', 'carbs', 'fat', 'fibre', 'sugars', 'satFat', 'salt', 'alcohol', 'servingG', 'servingText', 'packG', 'packText', 'liquid', 'scans', 'img']
+COLS = ['code', 'name', 'brand', 'kcal', 'protein', 'carbs', 'fat', 'fibre', 'sugars', 'satFat', 'salt', 'alcohol', 'servingG', 'servingText', 'packG', 'packText', 'liquid', 'scans', 'img', 'shops']
 
 def num(v):
     try:
@@ -52,6 +55,22 @@ def image_key(code, url):
         return None
     folder, key = m.group(1), m.group(2)
     return key if folder == folder_of(code) else f'/{folder}/{key}'
+
+# Supermarkets the product is listed as sold in (for the app's "Shop" filter)
+SHOP_TAGS = {
+    'tesco': 'tesco', 'sainsbury-s': 'sainsburys', 'sainsburys': 'sainsburys', 'asda': 'asda', 'morrisons': 'morrisons',
+    'aldi': 'aldi', 'lidl': 'lidl', 'co-op': 'coop', 'coop': 'coop', 'the-co-operative': 'coop', 'co-operative': 'coop',
+    'marks-spencer': 'ms', 'marks-and-spencer': 'ms', 'm-s': 'ms', 'waitrose': 'waitrose', 'iceland': 'iceland', 'ocado': 'ocado',
+}
+
+def shops_of(tags):
+    out = []
+    for t in tags.split(','):
+        t = t.strip().split(':')[-1]
+        s = SHOP_TAGS.get(t)
+        if s and s not in out:
+            out.append(s)
+    return ','.join(out) or None
 
 def words_of(text):
     return [w for w in re.split(r'[^a-z0-9]+', ascii_fold(text)) if w]
@@ -101,6 +120,7 @@ def main():
                 r(sq) if sq and sq < 5000 else None, g(row, 'serving_size').strip()[:24] or None,
                 r(pq) if pq and pq <= 3000 else None, qty[:24] or None, liquid, int(num(g(row, 'unique_scans_n')) or 0),
                 image_key(code, g(row, 'image_front_small_url') or g(row, 'image_small_url')),
+                shops_of(g(row, 'stores_tags')),
             ])
             extra_words[code] = brands_all
     print(f'read {n} rows, kept {len(keep)} UK products with nutrition')
@@ -119,8 +139,10 @@ def main():
 
     # Every word of name + brand, plus brand and name with spaces removed ("get pro" -> getpro)
     by2 = collections.defaultdict(list)
+    pwords = []  # each product's words (for the two-word files)
     for i, p in enumerate(prods):
         ws = set(words_of(f'{p[1]} {p[2]} {extra_words.get(p[0], "")}'))
+        pwords.append({w for w in ws if len(w) >= 2 and w not in STOP})
         for extra in [p[2], p[1], *extra_words.get(p[0], '').split(',')]:
             j = ''.join(words_of(extra))
             if j:
@@ -131,11 +153,25 @@ def main():
 
     os.makedirs(os.path.join(OUT, 's'), exist_ok=True)
     files = {}
+    overflow = {}  # prefix -> products that didn't fit in its file
+    name_len = [max(1, len(words_of(p[1]))) for p in prods]
     def write(prefix, idxs):
-        uniq = sorted(set(idxs))[:MAX_PER_FILE]  # product order = most scanned first
+        allx = sorted(set(idxs))  # product order = most scanned first
+        if len(allx) > MAX_PER_FILE:
+            # Busy file: two thirds most scanned, one third the closest names ("Chopped onions"
+            # rather than another flavour of "Cheese and onion crisps")
+            top = allx[:MAX_PER_FILE * 2 // 3]
+            chosen = set(top)
+            close = sorted((i for i in allx if i not in chosen), key=lambda i: (name_len[i], i))
+            uniq = sorted(chosen | set(close[:MAX_PER_FILE - len(top)]))
+            rest = [i for i in allx if i not in set(uniq)]
+        else:
+            uniq, rest = allx, []
         with open(os.path.join(OUT, 's', f'{prefix}.json'), 'w', encoding='utf-8') as fh:
             json.dump([prods[i] for i in uniq], fh, ensure_ascii=False, separators=(',', ':'))
         files[prefix] = len(uniq)
+        if rest:
+            overflow[prefix] = rest
 
     # Cloudflare Pages allows 20,000 files: split less if we'd go over
     split_at = SPLIT_AT
@@ -155,9 +191,29 @@ def main():
             for p3, s in by3.items():
                 write(p3, s)
 
+    # Two-word files for the products that didn't fit: "frozen chopped onions" is cut from
+    # the busy "oni" file (crisps are scanned far more), so it also goes in x/oni-fr.json
+    # (products with an "oni…" word AND an "fr…" word). The app asks for these when you
+    # type two or more words.
+    pairs = collections.defaultdict(set)
+    for prefix, idxs in overflow.items():
+        for i in idxs:
+            for v in pwords[i]:
+                if not v.startswith(prefix):
+                    pairs[f'{prefix}-{v[:2]}'].add(i)
+    budget = MAX_FILES - len(files) - 10
+    keep_pairs = sorted(pairs, key=lambda k: -len(pairs[k]))[:max(0, budget)]
+    os.makedirs(os.path.join(OUT, 'x'), exist_ok=True)
+    for k in keep_pairs:
+        rows = sorted(pairs[k])[:MAX_PER_FILE]
+        with open(os.path.join(OUT, 'x', f'{k}.json'), 'w', encoding='utf-8') as fh:
+            json.dump([prods[i] for i in rows], fh, ensure_ascii=False, separators=(',', ':'))
+    print(f'{len(overflow)} busy files; wrote {len(keep_pairs)} two-word files (of {len(pairs)} possible)')
+
     manifest = {
         'version': datetime.date.today().isoformat(),
         'cols': COLS,
+        'over': sorted(overflow),  # busy files that have two-word files in x/
         'files': files,  # prefix -> number of products in that file
         'products': len(prods),
         'licence': 'Open Food Facts data, ODbL. See ATTRIBUTION.txt',
