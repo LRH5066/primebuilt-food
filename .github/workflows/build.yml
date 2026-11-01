@@ -18,6 +18,8 @@ jobs:
         run: curl -L --fail --retry 3 -o off.csv.gz https://static.openfoodfacts.org/data/en.openfoodfacts.org.products.csv.gz
       - name: Build the search files
         run: python3 build.py off.csv.gz site
+      - name: Add the Open Food Facts sharing relay (functions/off, see README)
+        run: cp -r functions site/functions
       - name: Publish to the "site" branch (Cloudflare Pages picks it up)
         run: |
           cd site
