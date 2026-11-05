@@ -14,7 +14,7 @@ export function isImage(bytes) {
 export async function onRequestPost({ request, env }) {
   const acc = account(env);
   if (!acc) return refuse('sharing is switched off', 503);
-  if (Number(request.headers.get('Content-Length') || 0) > MAX_BYTES + 100_000) return refuse('photo too big', 413);
+  if (Number(request.headers.get('Content-Length') || 0) > MAX_BYTES * 1.4 + 100_000) return refuse('photo too big', 413);
   let form;
   try {
     form = await request.formData();
@@ -25,12 +25,26 @@ export async function onRequestPost({ request, env }) {
   const uuid = form.get('app_uuid');
   const kind = form.get('kind');
   const file = form.get('photo');
+  // The app sends the photo as text (base64) since its newer fetch can't attach files (Louis, 5 Nov:
+  // "Unsupported FormDataPart implementation"). A real file part still works too.
+  const b64 = form.get('photo_b64');
   if (!goodCode(code)) return refuse('barcode should be 8–14 digits');
   if (!goodUuid(uuid)) return refuse('missing app code');
   if (kind !== 'front' && kind !== 'nutrition') return refuse('photo should be the front or the label');
-  if (!file || typeof file === 'string') return refuse('no photo');
+  if ((!file || typeof file === 'string') && typeof b64 !== 'string') return refuse('no photo');
   if (overLimit(`i:${ip(request)}`, 40) || overLimit(`i:${uuid}`, 40)) return refuse('too many photos this hour, try later', 429);
-  const bytes = await file.arrayBuffer();
+  let bytes;
+  if (typeof b64 === 'string') {
+    if (b64.length > MAX_BYTES * 1.4) return refuse('photo too big', 413);
+    try {
+      const bin = atob(b64.replace(/^data:[^,]*,/, ''));
+      const u = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+      bytes = u.buffer;
+    } catch {
+      return refuse('photo couldn’t be read');
+    }
+  } else bytes = await file.arrayBuffer();
   if (bytes.byteLength > MAX_BYTES || bytes.byteLength < 5000) return refuse('photo size doesn’t look right', 413);
   const type = isImage(bytes);
   if (!type) return refuse('that isn’t a photo', 415);
