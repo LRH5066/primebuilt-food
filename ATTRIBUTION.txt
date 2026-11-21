@@ -1,0 +1,3 @@
+Food data from Open Food Facts (https://world.openfoodfacts.org), made available under the Open Database License (ODbL) https://opendatacommons.org/licenses/odbl/1-0/.
+This file set is a UK extract (products with nutrition information) used by the PrimeBuilt app, offered under the same licence.
+Product photos are hosted by Open Food Facts and licensed CC BY-SA 3.0 by their contributors.
